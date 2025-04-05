@@ -20,6 +20,10 @@
 #define DMA_BUFFER_MSIZE (DMA_BUFFER_SIZE_BYTES / DMA_BYTES_PER_MSIZE)  // 4 slots per sample
 
 
+#define SAMPLE_RATE      44100
+#define DURATION_SEC     3
+#define CHUNK_SIZE_BYTES 4096
+#define MAX_CHUNKS       ((SAMPLE_RATE * 2 * 2 * DURATION_SEC) / CHUNK_SIZE_BYTES) // ~129
 
 
 /* Audio status definition */

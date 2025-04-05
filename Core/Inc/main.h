@@ -31,6 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "cmsis_os.h"
 
 /* USER CODE END Includes */
 
@@ -70,6 +71,11 @@ void Error_Handler(void);
 #define DFSDM_DATIN1_Pin GPIO_PIN_3
 #define DFSDM_DATIN1_GPIO_Port GPIOC
 /* USER CODE BEGIN Private defines */
+
+typedef struct {
+    int16_t* data;
+    size_t length;
+} AudioChunk_t;
 
 /* USER CODE END Private defines */
 

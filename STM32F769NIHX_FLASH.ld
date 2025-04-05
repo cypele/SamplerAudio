@@ -38,20 +38,22 @@ ENTRY(Reset_Handler)
 /* Highest address of the user mode stack */
 _estack = ORIGIN(RAM) + LENGTH(RAM); /* end of "RAM" Ram type memory */
 
+/* Memory sizes */
 _Min_Heap_Size = 0x400; /* required amount of heap */
 _Min_Stack_Size = 0x800; /* required amount of stack */
 
-/* Memories definition */
+/* Memory regions definition */
 MEMORY
 {
   RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 512K
-  FLASH    (rx)    : ORIGIN = 0x8000000,   LENGTH = 2048K
+  FLASH    (rx)    : ORIGIN = 0x8000000,    LENGTH = 2048K
+  SDRAM  (xrw)     : ORIGIN = 0xC0000000,   LENGTH = 8M  /* External SDRAM */
 }
 
 /* Sections */
 SECTIONS
 {
-  /* The startup code into "FLASH" Rom type memory */
+  /* The startup code into "FLASH" ROM memory */
   .isr_vector :
   {
     . = ALIGN(4);
@@ -59,7 +61,7 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  /* The program code and other data into "FLASH" Rom type memory */
+  /* Program code and other data into "FLASH" ROM memory */
   .text :
   {
     . = ALIGN(4);
@@ -68,15 +70,13 @@ SECTIONS
     *(.glue_7)         /* glue arm to thumb code */
     *(.glue_7t)        /* glue thumb to arm code */
     *(.eh_frame)
-
     KEEP (*(.init))
     KEEP (*(.fini))
-
     . = ALIGN(4);
-    _etext = .;        /* define a global symbols at end of code */
+    _etext = .;        /* define a global symbol at end of code */
   } >FLASH
 
-  /* Constant data into "FLASH" Rom type memory */
+  /* Constant data into "FLASH" ROM memory */
   .rodata :
   {
     . = ALIGN(4);
@@ -85,14 +85,14 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  .ARM.extab (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .ARM.extab (READONLY) :
   {
     . = ALIGN(4);
     *(.ARM.extab* .gnu.linkonce.armextab.*)
     . = ALIGN(4);
   } >FLASH
 
-  .ARM (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .ARM (READONLY) :
   {
     . = ALIGN(4);
     __exidx_start = .;
@@ -101,7 +101,7 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  .preinit_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .preinit_array (READONLY) :
   {
     . = ALIGN(4);
     PROVIDE_HIDDEN (__preinit_array_start = .);
@@ -110,7 +110,7 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  .init_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .init_array (READONLY) :
   {
     . = ALIGN(4);
     PROVIDE_HIDDEN (__init_array_start = .);
@@ -120,7 +120,7 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH
 
-  .fini_array (READONLY) : /* The "READONLY" keyword is only supported in GCC11 and later, remove it if using GCC10 or earlier. */
+  .fini_array (READONLY) :
   {
     . = ALIGN(4);
     PROVIDE_HIDDEN (__fini_array_start = .);
@@ -133,7 +133,7 @@ SECTIONS
   /* Used by the startup to initialize data */
   _sidata = LOADADDR(.data);
 
-  /* Initialized data sections into "RAM" Ram type memory */
+  /* Initialized data sections into "RAM" RAM memory */
   .data :
   {
     . = ALIGN(4);
@@ -142,14 +142,11 @@ SECTIONS
     *(.data*)          /* .data* sections */
     *(.RamFunc)        /* .RamFunc sections */
     *(.RamFunc*)       /* .RamFunc* sections */
-
     . = ALIGN(4);
     _edata = .;        /* define a global symbol at data end */
-
   } >RAM AT> FLASH
 
-  /* Uninitialized data section into "RAM" Ram type memory */
-  . = ALIGN(4);
+  /* Uninitialized data section into "RAM" RAM memory */
   .bss :
   {
     /* This is used by the startup in order to initialize the .bss section */
@@ -158,13 +155,26 @@ SECTIONS
     *(.bss)
     *(.bss*)
     *(COMMON)
-
     . = ALIGN(4);
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM
 
-  /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
+  /* Section for large buffers in SDRAM */
+  .sdram_bss (NOLOAD) :
+  {
+    *(.sdram_bss)   /* Section for large buffers */
+  } >SDRAM
+
+  /* External SDRAM section for general use */
+  .sdram (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.sdram)
+    . = ALIGN(4);
+  } >SDRAM
+
+  /* User heap and stack sections */
   ._user_heap_stack :
   {
     . = ALIGN(8);

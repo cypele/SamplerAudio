@@ -13,14 +13,20 @@
 
 
 // **Bufory audio**
- int16_t play_buffer[BUFFER_SIZE_SAMPLES];
- int16_t record_buffer[BUFFER_SIZE_SAMPLES];
+int16_t record_buffer[BUFFER_SIZE_SAMPLES];
+int16_t play_buffer[BUFFER_SIZE_SAMPLES];
+int16_t compressed_buffer[BUFFER_SIZE_SAMPLES / 2]; // bo usuwasz połowę danych
+
 static uint32_t frequency = AUDIO_FREQUENCY_44K;
-static uint8_t volume = 60;
+static uint8_t volume = 80;
 SAI_HandleTypeDef               haudio_out_sai;
 SAI_HandleTypeDef               haudio_in_sai;
 AUDIO_DrvTypeDef *audio_drv = &wm8994_drv;
+DMA_HandleTypeDef hdma_sai_tx;
+DMA_HandleTypeDef hdma_sai_rx;
 
+extern osMessageQId AudioQueueHandle;
+extern TaskHandle_t xRecordingTaskHandle;
 
 volatile uint32_t audio_rec_buffer_state = BUFFER_OFFSET_NONE;
 volatile uint32_t audio_tx_buffer_state = 0;
@@ -43,6 +49,10 @@ void Sai_In_MspInit(SAI_HandleTypeDef *hsai);
 void CodekInit(AUDIO_DrvTypeDef  *audio_drv, uint32_t freq);
 void AudioInit(uint32_t AudioFreq);
 
+
+
+extern SemaphoreHandle_t recordTriggerSemaphore;
+extern SemaphoreHandle_t xBufferReadySemaphore;
 /**
  * @brief Inicjalizacja modułu audio
  */
@@ -104,12 +114,6 @@ void Audio_passThrough(void) {
 }
 
 
-void dosth(void)
-{
-    haudio_out_sai.Instance = AUDIO_OUT_SAIx;
-    haudio_in_sai.Instance = AUDIO_IN_SAIx;
-
-}
 
 /**
  * @brief Prosty filtr
@@ -362,7 +366,6 @@ void SAI_Clock_Configuration(uint32_t AudioFreq)
 
 void Sai_Out_MspInit(SAI_HandleTypeDef *hsai)
 {
-  static DMA_HandleTypeDef hdma_sai_tx;
   GPIO_InitTypeDef  gpio_init_structure;
 
   /* Enable SAI clock */
@@ -423,7 +426,6 @@ void Sai_Out_MspInit(SAI_HandleTypeDef *hsai)
 
 void Sai_In_MspInit(SAI_HandleTypeDef *hsai)
 {
-    static DMA_HandleTypeDef hdma_sai_rx;
     GPIO_InitTypeDef  gpio_init_structure;
 
     /* Enable SAI clock */
@@ -519,3 +521,95 @@ void AudioInit(uint32_t AudioFreq)
 }
 
 
+/* USER CODE BEGIN Header_StartRecordTask */
+/**
+* @brief Function implementing the Record_Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartRecordTask */
+void StartRecordTask(void const * argument)
+{
+    int recordingComplete = 0;
+    HAL_StatusTypeDef res;
+    xRecordingTaskHandle = xTaskGetCurrentTaskHandle();
+    AudioChunk_t chunk;
+
+    for (;;)
+    {
+        TickType_t startTime = xTaskGetTickCount();
+        TickType_t stopTime = startTime + pdMS_TO_TICKS(60000);
+        recordingComplete = 0;
+        audio_rec_buffer_state = BUFFER_OFFSET_NONE;
+
+        if (xSemaphoreTake(recordTriggerSemaphore, portMAX_DELAY) == pdTRUE) {
+
+            // Initialize the DMA to receive and transmit audio data
+            if (HAL_SAI_Receive_DMA(&haudio_in_sai, (uint8_t*)record_buffer, BUFFER_SIZE_SAMPLES) != HAL_OK)
+            {
+                Error_Handler();
+            }
+            if (HAL_SAI_Transmit_DMA(&haudio_out_sai, (uint8_t*)play_buffer, BUFFER_SIZE_SAMPLES) != HAL_OK)
+            {
+                Error_Handler();
+                return;
+            }
+
+            while (!recordingComplete)
+            {
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(portMAX_DELAY)); // Block until notified
+
+                if (audio_rec_buffer_state != BUFFER_OFFSET_NONE)
+                {
+            		HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, GPIO_PIN_SET);
+                    int16_t* source_ptr = NULL;
+
+                    if (audio_rec_buffer_state == BUFFER_OFFSET_HALF)
+                    {
+                        source_ptr = &record_buffer[0];
+                    }
+                    else if (audio_rec_buffer_state == BUFFER_OFFSET_FULL)
+                    {
+                        source_ptr = &record_buffer[BUFFER_SIZE_SAMPLES / 2];
+                    }
+
+                    // Skopiuj tylko slot 0 i 2 (L i R)
+                    size_t out_idx = 0;
+                    for (size_t i = 0; i < BUFFER_SIZE_SAMPLES / 2; i += 4)
+                    {
+                        compressed_buffer[out_idx++] = source_ptr[i];     // slot 0 - Left
+                        compressed_buffer[out_idx++] = source_ptr[i + 2]; // slot 2 - Right
+                    }
+
+                    chunk.data = compressed_buffer;
+                    chunk.length = out_idx; // liczba próbek stereo
+
+                    xQueueSend(AudioQueueHandle, &chunk, portMAX_DELAY);
+                    audio_rec_buffer_state = BUFFER_OFFSET_NONE;
+
+                    if (xTaskGetTickCount() >= stopTime)
+                    {
+
+                    	for(int i=0; i<10; i++)
+                    	{
+                    		HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
+                    		osDelay(330);
+                    		HAL_GPIO_TogglePin(LED_G_GPIO_Port, LED_G_Pin);
+                    	}
+
+                        HAL_SAI_DMAStop(&haudio_in_sai);
+                        HAL_SAI_DMAStop(&haudio_out_sai);
+                		HAL_GPIO_WritePin(LED_R_GPIO_Port, LED_R_Pin, GPIO_PIN_RESET);
+
+                        recordingComplete = 1;
+                        break;
+                    }
+                }
+            }
+
+            // Send end signal to the queue
+            AudioChunk_t endSignal = { .data = NULL, .length = 0 };
+            xQueueSend(AudioQueueHandle, &endSignal, portMAX_DELAY);
+        }
+    }
+}

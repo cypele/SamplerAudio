@@ -19,7 +19,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "cmsis_os.h"
-#include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -41,33 +40,11 @@
 
 
 
-#define SAMPLE_RATE     48000   // Częstotliwość próbkowania 48 kHz
-#define BITS_PER_SAMPLE 16      // Rozdzielczość 16-bitowa
-#define NUM_CHANNELS    1       // 1 = mono, 2 = stereo
-#define DURATION_SEC    1       // Czas nagrania w sekundach
 
 #define BUFFER_SIZE		4096
 
 
-#pragma pack(push, 1)  // Wymusza brak paddingu
-typedef struct {
-    char chunkID[4];       // "RIFF"
-    uint32_t chunkSize;    // Rozmiar całego pliku - 8 bajtów
-    char format[4];        // "WAVE"
-    char subchunk1ID[4];   // "fmt "
-    uint32_t subchunk1Size; // 16 dla PCM
-    uint16_t audioFormat;  // 1 = PCM
-    uint16_t numChannels;  // Liczba kanałów (1 = mono, 2 = stereo)
-    uint32_t sampleRate;   // 44100, 48000 itd.
-    uint32_t byteRate;     // sampleRate * numChannels * bitsPerSample/8
-    uint16_t blockAlign;   // numChannels * bitsPerSample/8
-    uint16_t bitsPerSample;// 8, 16, 24, 32
-    char subchunk2ID[4];   // "data"
-    uint32_t subchunk2Size;// Rozmiar danych audio (bez nagłówka)
-} WAV_Header;
-#pragma pack()
 
-char *filename = NULL;
 volatile uint32_t audio_p = 0; // Utrzymuje ciągłość fazową sinusa
 
 /* USER CODE END PD */
@@ -97,6 +74,11 @@ osThreadId SDCardTaskHandle;
 osThreadId GUI_TaskHandle;
 osThreadId Record_TaskHandle;
 osMessageQId AudioQueueHandle;
+SemaphoreHandle_t recordTriggerSemaphore;
+SemaphoreHandle_t xBufferReadySemaphore;
+
+TaskHandle_t xRecordingTaskHandle;
+
 /* USER CODE BEGIN PV */
 
 extern SAI_HandleTypeDef haudio_out_sai, haudio_in_sai;
@@ -111,13 +93,16 @@ static void MX_SDMMC2_SD_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_SAI1_Init(void);
 static void MX_DFSDM1_Init(void);
-void StartSDCardTask(void const * argument);
 void StartGUI_Task(void const * argument);
-void StartRecordTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
+extern void StartSDCardTask(void const * argument);
+extern void StartRecordTask(void const * argument);
+extern void AudioInit(uint32_t AudioFreq);
+void BSP_AUDIO_IN_TransferComplete_CallBack(void);
+void BSP_AUDIO_IN_HalfTransfer_CallBack(void);
 
-
+extern void MX_FATFS_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -165,8 +150,8 @@ int main(void)
   MX_SAI1_Init();
   MX_DFSDM1_Init();
   /* USER CODE BEGIN 2 */
-
-  Audio_passThrough();
+  AudioInit(AUDIO_FREQUENCY_44K);
+  //Audio_passThrough();
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -183,25 +168,31 @@ int main(void)
 
   /* Create the queue(s) */
   /* definition and creation of AudioQueue */
-  osMessageQDef(AudioQueue, 4, uint8_t);
+  osMessageQDef(AudioQueue, 4, AudioChunk_t);
   AudioQueueHandle = osMessageCreate(osMessageQ(AudioQueue), NULL);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
+  recordTriggerSemaphore = xSemaphoreCreateBinary();
+  xBufferReadySemaphore = xSemaphoreCreateBinary();
+
+
   /* USER CODE END RTOS_QUEUES */
+
 
   /* Create the thread(s) */
   /* definition and creation of SDCardTask */
-  osThreadDef(SDCardTask, StartSDCardTask, osPriorityNormal, 0, 1024);
+  osThreadDef(SDCardTask, StartSDCardTask, osPriorityAboveNormal, 0, 1024);
   SDCardTaskHandle = osThreadCreate(osThread(SDCardTask), NULL);
 
   /* definition and creation of GUI_Task */
-  osThreadDef(GUI_Task, StartGUI_Task, osPriorityNormal, 0, 128);
+  osThreadDef(GUI_Task, StartGUI_Task, osPriorityLow, 0, 512);
   GUI_TaskHandle = osThreadCreate(osThread(GUI_Task), NULL);
 
   /* definition and creation of Record_Task */
-  osThreadDef(Record_Task, StartRecordTask, osPriorityIdle, 0, 2048);
+  osThreadDef(Record_Task, StartRecordTask, osPriorityHigh, 0, 2048);
   Record_TaskHandle = osThreadCreate(osThread(Record_Task), NULL);
+
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -569,43 +560,14 @@ static void MX_GPIO_Init(void)
 
 
 
+void HAL_SAI_TxHalfCpltCallback(SAI_HandleTypeDef *hsai)
+{
+	audio_tx_buffer_state = BUFFER_OFFSET_HALF;
+}
 
-int GetAvailableFilename(FRESULT res, FILINFO fno ) {
-	char numStr[4];
-	char name[20] = "SAMPLE";
-	char wav[4] = ".WAV";
-	sprintf(numStr, "%d", 1);
-	strcat(name, numStr);
-	strcat(name, wav);
-
-	res = f_stat(name, &fno);
-	if (res == FR_OK){
-		name[6] = name[6] & 0;
-		name[7] = name[7] & 0;
-		name[8] = name[8] & 0;
-		name[9] = name[9] & 0;
-		for(int i = 2; i<1000; i++){
-			sprintf(numStr, "%d", i);
-			strcat(name, numStr);
-			res = f_stat(name, &fno);
-			if(res == FR_OK){
-				name[6] = name[6] & 0;
-				name[7] = name[7] & 0;
-				name[8] = name[8] & 0;
-				name[9] = name[9] & 0;
-				continue;
-
-			}else if(res == FR_NO_FILE)
-			{
-				return i;
-				break;
-			}
-		}
-	}else if (res == FR_NO_FILE){
-		return 1;
-	}else{
-		Error_Handler();
-	}
+void HAL_SAI_TxCpltCallback(SAI_HandleTypeDef *hsai)
+{
+	audio_tx_buffer_state = BUFFER_OFFSET_FULL;
 }
 
 void HAL_SAI_RxCpltCallback(SAI_HandleTypeDef *hsai)
@@ -625,32 +587,33 @@ void HAL_SAI_RxHalfCpltCallback(SAI_HandleTypeDef *hsai)
 
 void BSP_AUDIO_IN_TransferComplete_CallBack(void)
 {
-	audio_rec_buffer_state = BUFFER_OFFSET_FULL;
+    // Set the buffer state
+    audio_rec_buffer_state = BUFFER_OFFSET_FULL;
+
+    // Notify the task that the full buffer is ready
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(xRecordingTaskHandle, &xHigherPriorityTaskWoken); // Notify task
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken); // Yield to higher priority tasks
 }
 
 void BSP_AUDIO_IN_HalfTransfer_CallBack(void)
 {
-	audio_rec_buffer_state = BUFFER_OFFSET_HALF;
+    // Set the buffer state
+    audio_rec_buffer_state = BUFFER_OFFSET_HALF;
+
+    // Notify the task that the half-buffer is ready
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(xRecordingTaskHandle, &xHigherPriorityTaskWoken); // Notify task
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken); // Yield to higher priority tasks
 }
 /* USER CODE END 4 */
 
-/* USER CODE BEGIN Header_StartSDCardTask */
-/**
-  * @brief  Function implementing the SDCardTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartSDCardTask */
-void StartSDCardTask(void const * argument)
-{
-  /* USER CODE BEGIN 5 */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END 5 */
-}
+
+/* USER CODE BEGIN 5 */
+/* USER CODE END 5 */
+
 
 /* USER CODE BEGIN Header_StartGUI_Task */
 /**
@@ -667,15 +630,13 @@ void StartGUI_Task(void const * argument)
   for(;;)
   {
       // Toggle LED
-      HAL_GPIO_TogglePin(LED_R_GPIO_Port, LED_R_Pin);
+     // HAL_GPIO_TogglePin(LED_R_GPIO_Port, LED_R_Pin);
       toggleCount++;
 
-      // Signal SDCardTask every 5 toggles
       if (toggleCount == 5)
       {
-          xQueueSend(AudioQueueHandle, (void *) &toggleCount, portMAX_DELAY);
-          toggleCount = 0; // Reset counter
-
+          xSemaphoreGive(recordTriggerSemaphore); // signal record task
+          toggleCount = 0;
       }
 
       osDelay(500); // Run every 500ms
@@ -683,23 +644,7 @@ void StartGUI_Task(void const * argument)
   /* USER CODE END StartGUI_Task */
 }
 
-/* USER CODE BEGIN Header_StartRecordTask */
-/**
-* @brief Function implementing the Record_Task thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_StartRecordTask */
-void StartRecordTask(void const * argument)
-{
-  /* USER CODE BEGIN StartRecordTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
-  /* USER CODE END StartRecordTask */
-}
+
 
 /**
   * @brief  This function is executed in case of error occurrence.
